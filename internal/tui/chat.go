@@ -33,14 +33,29 @@ type chatModel struct {
 	user      string
 	sessionID string
 
-	lines          []string
-	viewport       viewport.Model
-	input          textarea.Model
-	spinner        spinner.Model
-	help           help.Model
-	md             *glamour.TermRenderer
-	waiting        bool
-	pendingConfirm *pendingConfirmation
+	lines    []string
+	viewport viewport.Model
+	input    textarea.Model
+	spinner  spinner.Model
+	help     help.Model
+	md       *glamour.TermRenderer
+	waiting  bool
+
+	// confirmQueue holds every HITL confirmation still awaiting an answer
+	// from the current turn -- a model can call the same gated tool (or
+	// several) in parallel, and ADK batches all of their
+	// adk_request_confirmation wrappers into one event, not one event
+	// each (see internal/llminternal/base_flow.go's handleFunctionCalls
+	// in the ADK module: parallel FunctionCalls run concurrently and get
+	// merged into a single confirmation-request event). Answered one at a
+	// time (front of queue first); confirmResults accumulates the
+	// FunctionResponse for each answer and is only sent, as a single
+	// batched turn, once the queue is empty -- every gated call from that
+	// turn needs a response before the run can proceed, so answering only
+	// the first and sending immediately would leave the rest hanging
+	// until the backend's context deadline exceeded.
+	confirmQueue   []pendingConfirmation
+	confirmResults []natsapi.Part
 
 	// pendingStateDelta, if non-nil, rides along with the next RunTurn
 	// call only (then is cleared) -- used to set "botson:cwd" on a freshly
@@ -100,7 +115,7 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		if m.pendingConfirm != nil {
+		if len(m.confirmQueue) > 0 {
 			switch msg.String() {
 			case "y", "Y":
 				return m.answerConfirm(true)
@@ -139,7 +154,7 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		cmds = append(cmds, cmd)
-	} else if m.pendingConfirm == nil {
+	} else if len(m.confirmQueue) == 0 {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		cmds = append(cmds, cmd)
@@ -159,28 +174,40 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+// answerConfirm records an answer for the confirmation at the front of
+// confirmQueue and pops it. If more are still queued (a parallel turn with
+// several gated calls), it waits for the next y/n instead of sending
+// anything yet -- every one of them needs an answer before the run can
+// proceed, so the batched FunctionResponses only go out once the queue is
+// empty.
 func (m chatModel) answerConfirm(confirmed bool) (chatModel, tea.Cmd) {
-	pc := m.pendingConfirm
-	m.pendingConfirm = nil
+	pc := m.confirmQueue[0]
+	m.confirmQueue = m.confirmQueue[1:]
 	label := "denied"
 	if confirmed {
 		label = "approved"
 	}
 	m.appendLine(dimStyle.Render(fmt.Sprintf("[%s: %s]", label, pc.toolName)))
+
+	m.confirmResults = append(m.confirmResults, natsapi.Part{
+		FunctionResponse: &natsapi.FunctionResponse{
+			ID:       pc.confirmCallID,
+			Name:     natsapi.ConfirmationFunctionName,
+			Response: map[string]any{"confirmed": confirmed},
+		},
+	})
+
+	if len(m.confirmQueue) > 0 {
+		return m, nil
+	}
+
+	parts := m.confirmResults
+	m.confirmResults = nil
 	m.waiting = true
 
-	resp := natsapi.Content{
-		Role: "user",
-		Parts: []natsapi.Part{{
-			FunctionResponse: &natsapi.FunctionResponse{
-				ID:       pc.confirmCallID,
-				Name:     natsapi.ConfirmationFunctionName,
-				Response: map[string]any{"confirmed": confirmed},
-			},
-		}},
-	}
+	resp := natsapi.Content{Role: "user", Parts: parts}
 	// pendingStateDelta (if any) was already sent and cleared on the turn
-	// that produced this pending confirmation -- never resent here.
+	// that produced these pending confirmations -- never resent here.
 	return m, tea.Batch(m.spinner.Tick, runTurnCmd(m.client, m.app, m.user, m.sessionID, resp, nil))
 }
 
@@ -213,15 +240,27 @@ func (m *chatModel) processEvents(events []natsapi.Event) {
 			case part.FunctionCall != nil && part.FunctionCall.Name == natsapi.ConfirmationFunctionName:
 				args := decodeConfirmationArgs(part.FunctionCall.Args)
 				toolName := ""
+				argsPreview := ""
 				if args.OriginalFunctionCall != nil {
 					toolName = args.OriginalFunctionCall.Name
+					if len(args.OriginalFunctionCall.Args) > 0 {
+						if b, err := json.Marshal(args.OriginalFunctionCall.Args); err == nil {
+							argsPreview = "\n  " + string(b)
+						}
+					}
 				}
-				m.pendingConfirm = &pendingConfirmation{
+				// Queued, not answered immediately -- a model can call the
+				// same (or several) gated tools in parallel, and ADK
+				// batches every one of that turn's adk_request_confirmation
+				// wrappers into this single event rather than one event
+				// each, so there can be more than one of these per call to
+				// processEvents.
+				m.confirmQueue = append(m.confirmQueue, pendingConfirmation{
 					confirmCallID: part.FunctionCall.ID,
 					toolName:      toolName,
 					hint:          args.ToolConfirmation.Hint,
-				}
-				m.lines = append(m.lines, confirmStyle.Render(fmt.Sprintf("! %s\n  Approve? (y/n)", args.ToolConfirmation.Hint)))
+				})
+				m.lines = append(m.lines, confirmStyle.Render(fmt.Sprintf("! %s%s\n  Approve? (y/n)", args.ToolConfirmation.Hint, argsPreview)))
 
 			case part.FunctionCall != nil:
 				m.lines = append(m.lines, dimStyle.Render(fmt.Sprintf("[tool call: %s]", part.FunctionCall.Name)))
@@ -289,13 +328,17 @@ func (m chatModel) View() string {
 	case m.waiting:
 		b.WriteString(m.spinner.View())
 		b.WriteString(" thinking...")
-	case m.pendingConfirm != nil:
-		b.WriteString(confirmStyle.Render("Waiting for your approval"))
+	case len(m.confirmQueue) > 0:
+		msg := "Waiting for your approval"
+		if n := len(m.confirmQueue); n > 1 {
+			msg = fmt.Sprintf("%s (%d more pending)", msg, n-1)
+		}
+		b.WriteString(confirmStyle.Render(msg))
 	default:
 		b.WriteString(m.input.View())
 	}
 	b.WriteString("\n")
-	if m.pendingConfirm != nil {
+	if len(m.confirmQueue) > 0 {
 		b.WriteString(m.help.ShortHelpView([]key.Binding{keys.Approve, keys.Deny, keys.Scroll, keys.Quit}))
 	} else {
 		b.WriteString(m.help.ShortHelpView([]key.Binding{keys.Send, keys.Scroll, keys.Quit}))
