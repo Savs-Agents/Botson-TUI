@@ -23,8 +23,9 @@ owns the terminal, so nothing prints to stdout while it's running).
 ## Building
 
 ```bash
-go build -o bin/botson-tui ./cmd/botson-tui
+go run scripts/build_linux.go     # or build_windows.go on Windows
 ```
+This produces `bin/botson-tui-<os>-<arch>`.
 
 ## Running
 
@@ -32,7 +33,7 @@ You'll need a `botson core` already running somewhere reachable (see the
 core's own README for how to start one). Then:
 
 ```bash
-./bin/botson-tui
+./bin/botson-tui-linux-amd64
 ```
 
 On first run you'll be asked for the core's host/port and a user ID —
