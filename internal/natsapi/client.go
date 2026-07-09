@@ -33,8 +33,13 @@ func Connect(host string, port int, token string) (*Client, error) {
 		return nil, fmt.Errorf("connect to %s: %w", natsURL, err)
 	}
 	return &Client{
-		nc:  nc,
-		adk: adkclient.New(nc, adkclient.WithTimeout(60*time.Second)),
+		nc: nc,
+		// Must stay above the core's own gateway RequestTimeout (see
+		// Botson-ADKv2's cmd/botson-core/cmd_core.go, currently
+		// procutil.DefaultTimeout + 90s = 3m30s) or this client gives up
+		// before the core's own request-to-backend deadline would have,
+		// masking the real error with a generic NATS timeout instead.
+		adk: adkclient.New(nc, adkclient.WithTimeout(4*time.Minute)),
 	}, nil
 }
 
