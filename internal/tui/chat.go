@@ -41,9 +41,14 @@ type chatModel struct {
 	md             *glamour.TermRenderer
 	waiting        bool
 	pendingConfirm *pendingConfirmation
+
+	// pendingStateDelta, if non-nil, rides along with the next RunTurn
+	// call only (then is cleared) -- used to set "botson:cwd" on a freshly
+	// created session's first turn. Always nil when resuming a session.
+	pendingStateDelta map[string]any
 }
 
-func newChatModel(client *natsapi.Client, app, user, sessionID string, history []natsapi.Event, width, height int) chatModel {
+func newChatModel(client *natsapi.Client, app, user, sessionID string, history []natsapi.Event, initialCwd string, width, height int) chatModel {
 	ta := textarea.New()
 	ta.Placeholder = "Type a message..."
 	ta.ShowLineNumbers = false
@@ -66,6 +71,9 @@ func newChatModel(client *natsapi.Client, app, user, sessionID string, history [
 		spinner:   sp,
 		help:      help.New(),
 		md:        md,
+	}
+	if initialCwd != "" {
+		m.pendingStateDelta = map[string]any{"botson:cwd": initialCwd}
 	}
 	m.setWidth(width)
 	m.processEvents(history)
@@ -109,10 +117,12 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 			m.input.Reset()
 			m.appendLine(userStyle.Render("you") + "\n" + text)
 			m.waiting = true
+			stateDelta := m.pendingStateDelta
+			m.pendingStateDelta = nil
 			return m, tea.Batch(m.spinner.Tick, runTurnCmd(m.client, m.app, m.user, m.sessionID, natsapi.Content{
 				Role:  "user",
 				Parts: []natsapi.Part{{Text: text}},
-			}))
+			}, stateDelta))
 		}
 		// PageUp/PageDown are the only keys that scroll history -- every
 		// other key goes to the input box (see the isKey guard below),
@@ -169,7 +179,9 @@ func (m chatModel) answerConfirm(confirmed bool) (chatModel, tea.Cmd) {
 			},
 		}},
 	}
-	return m, tea.Batch(m.spinner.Tick, runTurnCmd(m.client, m.app, m.user, m.sessionID, resp))
+	// pendingStateDelta (if any) was already sent and cleared on the turn
+	// that produced this pending confirmation -- never resent here.
+	return m, tea.Batch(m.spinner.Tick, runTurnCmd(m.client, m.app, m.user, m.sessionID, resp, nil))
 }
 
 // applyEvents renders a turn's (or a resumed session's) events into the

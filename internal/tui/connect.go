@@ -5,6 +5,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
+
+	"github.com/Savs-Agents/Botson-TUI/internal/natsapi"
 )
 
 // connectModel is the first screen: where's the core, and who am I to it.
@@ -13,14 +15,26 @@ type connectModel struct {
 	host   string
 	port   string
 	userID string
+	token  string
 	errMsg string
 }
 
-func newConnectModel(host string, port int, userID string) connectModel {
+func newConnectModel(host string, port int, userID, token string) connectModel {
+	tokenHelp := "Required -- the core rejects unauthenticated connections. Auto-filled from this machine's own ~/.botson/config.json when the core is local."
+	if token == "" {
+		if local, ok := natsapi.LocalToken(); ok {
+			token = local
+			tokenHelp = "Auto-detected from this machine's ~/.botson/config.json (a local core). For a remote core, replace it with the token given at setup time."
+		} else {
+			tokenHelp = "Required -- the core rejects unauthenticated connections. No local core detected on this machine; paste in the token printed by `setup install` (or read from the core's own ~/.botson/config.json)."
+		}
+	}
+
 	m := connectModel{
 		host:   host,
 		port:   strconv.Itoa(port),
 		userID: userID,
+		token:  token,
 	}
 	m.form = huh.NewForm(
 		huh.NewGroup(
@@ -33,6 +47,11 @@ func newConnectModel(host string, port int, userID string) connectModel {
 				Title("Your user ID").
 				Description("Identifies your sessions to the core -- any string works, it's yours to choose.").
 				Value(&m.userID),
+			huh.NewInput().
+				Title("NATS auth token").
+				Description(tokenHelp).
+				EchoMode(huh.EchoModePassword).
+				Value(&m.token),
 		),
 	)
 	return m
@@ -63,8 +82,8 @@ func (m connectModel) Completed() bool {
 	return m.form.State == huh.StateCompleted
 }
 
-// Values returns the submitted host, port, and user ID.
-func (m connectModel) Values() (host string, port int, userID string) {
+// Values returns the submitted host, port, user ID, and token.
+func (m connectModel) Values() (host string, port int, userID, token string) {
 	p, _ := strconv.Atoi(m.port)
-	return m.host, p, m.userID
+	return m.host, p, m.userID, m.token
 }

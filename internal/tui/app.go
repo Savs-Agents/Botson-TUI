@@ -3,6 +3,8 @@
 package tui
 
 import (
+	"strings"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -16,6 +18,7 @@ const (
 	modeConnect mode = iota
 	modeAgentPicker
 	modeSessionPicker
+	modeNewSessionCwd
 	modeChat
 )
 
@@ -29,15 +32,17 @@ type Model struct {
 	cfg           config.Config
 	client        *natsapi.Client
 	selectedAgent string
+	pendingCwd    string // set by the cwd prompt, consumed once the new session's first turn is sent
 
 	loading     bool
 	loadingText string
 	spinnerOnly spinnerModel
 
-	connect  connectModel
-	agents   agentPickerModel
-	sessions sessionPickerModel
-	chat     chatModel
+	connect   connectModel
+	agents    agentPickerModel
+	sessions  sessionPickerModel
+	cwdPrompt cwdPromptModel
+	chat      chatModel
 }
 
 // New builds the initial Model from a loaded local config.
@@ -45,7 +50,7 @@ func New(cfg config.Config) Model {
 	m := Model{
 		cfg:         cfg,
 		mode:        modeConnect,
-		connect:     newConnectModel(cfg.Host, cfg.Port, cfg.UserID),
+		connect:     newConnectModel(cfg.Host, cfg.Port, cfg.UserID, cfg.Token),
 		spinnerOnly: newSpinnerModel(),
 	}
 	return m
@@ -111,7 +116,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionReadyMsg:
 		m.loading = false
 		m.mode = modeChat
-		m.chat = newChatModel(m.client, m.selectedAgent, m.cfg.UserID, msg.sess.ID, msg.sess.Events, m.width, m.height)
+		m.chat = newChatModel(m.client, m.selectedAgent, m.cfg.UserID, msg.sess.ID, msg.sess.Events, m.pendingCwd, m.width, m.height)
+		m.pendingCwd = ""
 		return m, m.chat.Init()
 
 	case sessionErrMsg:
@@ -139,12 +145,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.connect, cmd = m.connect.Update(msg)
 		if m.connect.Completed() {
-			host, port, userID := m.connect.Values()
-			m.cfg.Host, m.cfg.Port, m.cfg.UserID = host, port, userID
+			host, port, userID, token := m.connect.Values()
+			m.cfg.Host, m.cfg.Port, m.cfg.UserID, m.cfg.Token = host, port, userID, token
 			_ = config.Save(m.cfg)
 			m.loading = true
 			m.loadingText = "Connecting..."
-			return m, connectCmd(host, port)
+			return m, connectCmd(host, port, token)
 		}
 		return m, cmd
 
@@ -165,13 +171,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.sessions, cmd = m.sessions.Update(msg)
 		if isNew, sid, ok := m.sessions.Selected(); ok {
-			m.loading = true
 			if isNew {
-				m.loadingText = "Creating session..."
-				return m, createSessionCmd(m.client, m.selectedAgent, m.cfg.UserID)
+				m.mode = modeNewSessionCwd
+				m.cwdPrompt = newCwdPromptModel()
+				return m, m.cwdPrompt.Init()
 			}
+			m.loading = true
 			m.loadingText = "Loading session..."
 			return m, getSessionCmd(m.client, m.selectedAgent, m.cfg.UserID, sid)
+		}
+		return m, cmd
+
+	case modeNewSessionCwd:
+		var cmd tea.Cmd
+		m.cwdPrompt, cmd = m.cwdPrompt.Update(msg)
+		if m.cwdPrompt.Completed() {
+			m.pendingCwd = strings.TrimSpace(m.cwdPrompt.cwd)
+			m.loading = true
+			m.loadingText = "Creating session..."
+			return m, createSessionCmd(m.client, m.selectedAgent, m.cfg.UserID)
 		}
 		return m, cmd
 
@@ -196,6 +214,8 @@ func (m Model) View() string {
 		return m.agents.View()
 	case modeSessionPicker:
 		return m.sessions.View()
+	case modeNewSessionCwd:
+		return lipgloss.NewStyle().Padding(1, 2).Render(m.cwdPrompt.View())
 	case modeChat:
 		return m.chat.View()
 	}

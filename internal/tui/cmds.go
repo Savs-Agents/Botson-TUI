@@ -25,9 +25,9 @@ type (
 	turnErrMsg        struct{ err error }
 )
 
-func connectCmd(host string, port int) tea.Cmd {
+func connectCmd(host string, port int, token string) tea.Cmd {
 	return func() tea.Msg {
-		c, err := natsapi.Connect(host, port)
+		c, err := natsapi.Connect(host, port, token)
 		if err != nil {
 			return connectErrMsg{err}
 		}
@@ -83,11 +83,11 @@ func getSessionCmd(c *natsapi.Client, agent, user, sessionID string) tea.Cmd {
 	}
 }
 
-func runTurnCmd(c *natsapi.Client, app, user, sessionID string, newMessage natsapi.Content) tea.Cmd {
+func runTurnCmd(c *natsapi.Client, app, user, sessionID string, newMessage natsapi.Content, stateDelta map[string]any) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
-		events, err := c.RunTurn(ctx, app, user, sessionID, newMessage)
+		events, err := c.RunTurn(ctx, app, user, sessionID, newMessage, stateDelta)
 		if err != nil {
 			return turnErrMsg{err}
 		}

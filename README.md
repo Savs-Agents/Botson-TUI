@@ -36,15 +36,22 @@ core's own README for how to start one). Then:
 ./bin/botson-tui-linux-amd64
 ```
 
-On first run you'll be asked for the core's host/port and a user ID —
-this is *your* choice; the core makes no assumptions about what a user ID
-looks like. These are remembered for next time in
+On first run you'll be asked for the core's host/port, a user ID (*your*
+choice; the core makes no assumptions about what one looks like), and a
+NATS auth token — the core rejects unauthenticated connections. If the
+core is running on this same machine, its token is auto-detected from
+`~/.botson/config.json` (the same file `botson setup install` writes) and
+the field is pre-filled; for a remote core, paste in the token it printed
+at setup time. All of this is remembered for next time in
 `<user config dir>/botson-tui/config.json` (on Windows,
 `%AppData%\botson-tui\config.json`).
 
-From there: pick an agent, pick or create a session, and chat. If a tool
-call needs your approval, the prompt will say so — press `y` to approve or
-`n` to deny.
+From there: pick an agent, then pick or create a session. Creating a new
+session asks for an optional working directory — an absolute path the
+agent's file/command tools should use for that session instead of the
+core's own default workspace; leave it blank to use the default. Then
+chat. If a tool call needs your approval, the prompt will say so — press
+`y` to approve or `n` to deny.
 
 ## Scope
 

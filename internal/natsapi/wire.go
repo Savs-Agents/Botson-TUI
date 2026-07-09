@@ -62,6 +62,12 @@ type RunRequest struct {
 	UserID     string  `json:"userId"`
 	SessionID  string  `json:"sessionId"`
 	NewMessage Content `json:"newMessage"`
+
+	// StateDelta is upstream ADK's own mechanism for merging values into a
+	// session's state as part of a turn -- used here to set "botson:cwd"
+	// (see docs/nats-api.md in Botson-ADKv2) on a freshly created
+	// session's first turn. nil on every other turn.
+	StateDelta map[string]any `json:"stateDelta,omitempty"`
 }
 
 // SessionStat mirrors Botson-ADKv2's internal/management.SessionStat, the

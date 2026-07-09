@@ -20,6 +20,12 @@ type Config struct {
 	Port      int    `json:"port"`
 	UserID    string `json:"userId"`
 	LastAgent string `json:"lastAgent,omitempty"`
+
+	// Token is the NATS auth token last used to connect, remembered so a
+	// manually-entered token (for a remote core) doesn't need retyping.
+	// For a core on this same machine, natsapi.LocalToken auto-detects it
+	// instead -- this field is only the fallback/manual-entry memory.
+	Token string `json:"token,omitempty"`
 }
 
 func defaultConfig() Config {

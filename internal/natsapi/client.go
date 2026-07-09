@@ -22,10 +22,13 @@ type Client struct {
 	adk *adkclient.Client
 }
 
-// Connect dials the core's embedded NATS server at host:port.
-func Connect(host string, port int) (*Client, error) {
+// Connect dials the core's embedded NATS server at host:port. token
+// authenticates the connection -- required, since the core's embedded
+// NATS server rejects unauthenticated connections (see LocalToken for
+// zero-config pairing with a core on this same machine).
+func Connect(host string, port int, token string) (*Client, error) {
 	natsURL := fmt.Sprintf("nats://%s:%d", host, port)
-	nc, err := nats.Connect(natsURL, nats.Timeout(5*time.Second))
+	nc, err := nats.Connect(natsURL, nats.Timeout(5*time.Second), nats.Token(token))
 	if err != nil {
 		return nil, fmt.Errorf("connect to %s: %w", natsURL, err)
 	}
@@ -99,12 +102,16 @@ func (c *Client) GetSession(ctx context.Context, app, user, sessionID string) (*
 }
 
 // RunTurn sends one turn (newMessage) and returns the events it produced.
-func (c *Client) RunTurn(ctx context.Context, app, user, sessionID string, newMessage Content) ([]Event, error) {
+// stateDelta is nil on every turn except optionally the first one of a
+// freshly created session (see docs/nats-api.md's "setting a session's
+// working directory").
+func (c *Client) RunTurn(ctx context.Context, app, user, sessionID string, newMessage Content, stateDelta map[string]any) ([]Event, error) {
 	body, err := json.Marshal(RunRequest{
 		AppName:    app,
 		UserID:     user,
 		SessionID:  sessionID,
 		NewMessage: newMessage,
+		StateDelta: stateDelta,
 	})
 	if err != nil {
 		return nil, err
