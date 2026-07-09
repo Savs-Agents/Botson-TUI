@@ -35,7 +35,7 @@ func run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	p := tea.NewProgram(tui.New(cfg), tea.WithAltScreen())
+	p := tea.NewProgram(tui.New(cfg), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err = p.Run()
 	return err
 }

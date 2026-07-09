@@ -114,6 +114,15 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 				Parts: []natsapi.Part{{Text: text}},
 			}))
 		}
+		// PageUp/PageDown are the only keys that scroll history -- every
+		// other key goes to the input box (see the isKey guard below),
+		// since the viewport's own default bindings are plain letters
+		// (u/d/j/k/h/l/space/f/b) that would otherwise fight with typing.
+		if msg.Type == tea.KeyPgUp || msg.Type == tea.KeyPgDown {
+			var cmd tea.Cmd
+			m.viewport, cmd = m.viewport.Update(msg)
+			return m, cmd
+		}
 	}
 
 	if m.waiting {
@@ -126,9 +135,16 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		cmds = append(cmds, cmd)
 	}
 
-	var cmd tea.Cmd
-	m.viewport, cmd = m.viewport.Update(msg)
-	cmds = append(cmds, cmd)
+	// The viewport's own key bindings are a vim-style pager (u/d/j/k/h/l/
+	// space/f/b/pgup/pgdown) that would otherwise steal those letters
+	// from the input box, so keyboard input goes to the textarea only --
+	// the viewport still scrolls via mouse wheel (see tea.WithMouseCellMotion
+	// in main.go) and auto-follows new messages via GotoBottom.
+	if _, isKey := msg.(tea.KeyMsg); !isKey {
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
+		cmds = append(cmds, cmd)
+	}
 
 	return m, tea.Batch(cmds...)
 }
@@ -268,9 +284,9 @@ func (m chatModel) View() string {
 	}
 	b.WriteString("\n")
 	if m.pendingConfirm != nil {
-		b.WriteString(m.help.ShortHelpView([]key.Binding{keys.Approve, keys.Deny, keys.Quit}))
+		b.WriteString(m.help.ShortHelpView([]key.Binding{keys.Approve, keys.Deny, keys.Scroll, keys.Quit}))
 	} else {
-		b.WriteString(m.help.ShortHelpView([]key.Binding{keys.Send, keys.Quit}))
+		b.WriteString(m.help.ShortHelpView([]key.Binding{keys.Send, keys.Scroll, keys.Quit}))
 	}
 	return b.String()
 }
