@@ -59,6 +59,17 @@ run after this turn's approvals and answered it for you automatically,
 no action needed; `✓ toolName  done` or `✗ toolName  error · …` is the
 final outcome.
 
+Press `ctrl+a` to toggle **auto mode** for the current session — every
+confirmation from then on is answered automatically instead of prompting
+(`✓ toolName  auto-approved`), and `[auto mode: ON]` shows next to the
+session id in the header. This isn't just a client-side shortcut: the
+setting is saved on the session itself, so the core's own background
+worker keeps answering pending confirmations and letting the agent
+continue even after you close the TUI entirely — reopen later to see what
+it did while you were away. As a safety net, a session that racks up too
+many consecutive auto-approvals with no re-enable in between turns auto
+mode back off on its own and says why in the chat log.
+
 ## Scope
 
 This is a v1, chat-only client: connect → pick agent → pick/create session

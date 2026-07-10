@@ -23,6 +23,7 @@ type (
 	sessionErrMsg     struct{ err error }
 	turnDoneMsg       struct{ events []natsapi.Event }
 	turnErrMsg        struct{ err error }
+	autoModeErrMsg    struct{ err error }
 )
 
 func connectCmd(host string, port int, token string) tea.Cmd {
@@ -80,6 +81,17 @@ func getSessionCmd(c *natsapi.Client, agent, user, sessionID string) tea.Cmd {
 			return sessionErrMsg{err}
 		}
 		return sessionReadyMsg{sess}
+	}
+}
+
+func setAutoModeCmd(c *natsapi.Client, app, user, sessionID string, enabled bool) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := c.SetSessionAutoMode(ctx, app, user, sessionID, enabled); err != nil {
+			return autoModeErrMsg{err}
+		}
+		return nil
 	}
 }
 

@@ -51,7 +51,7 @@ func (v *toolCallView) render() string {
 		glyph, style = "?", confirmStyle
 	case "denied", "error":
 		glyph, style = "✗", errorStyle
-	case "done", "approved", "deferred":
+	case "done", "approved", "deferred", "auto-approved":
 		glyph, style = "✓", dimStyle
 	}
 	text := fmt.Sprintf("%s %-15s %s", glyph, v.name, v.phase)
@@ -109,6 +109,16 @@ type chatModel struct {
 	// carries the wrapper's id, not the original call's.
 	wrapperOrig map[string]string
 
+	// autoMode mirrors the session's own natsapi.AutoModeStateKey flag --
+	// when true, this client answers every confirmation itself (marked
+	// natsapi.AutoModeResponseKey so history shows it wasn't a human's own
+	// y/n) instead of queuing it. The core's own background automode
+	// worker (Botson-ADKv2's internal/automode) does the same thing
+	// unattended, as a fallback once this client disconnects -- so a
+	// pending confirmation still gets answered even if you close the TUI
+	// mid-task; this just answers it faster while you're still connected.
+	autoMode bool
+
 	// confirmQueue holds every HITL confirmation still awaiting an answer
 	// from the current turn -- a model can call the same gated tool (or
 	// several) in parallel, and ADK batches all of their
@@ -137,7 +147,7 @@ type chatModel struct {
 	pendingStateDelta map[string]any
 }
 
-func newChatModel(client *natsapi.Client, app, user, sessionID string, history []natsapi.Event, initialCwd string, width, height int) chatModel {
+func newChatModel(client *natsapi.Client, app, user, sessionID string, history []natsapi.Event, state map[string]any, initialCwd string, width, height int) chatModel {
 	ta := textarea.New()
 	ta.Placeholder = "Type a message..."
 	ta.ShowLineNumbers = false
@@ -149,6 +159,8 @@ func newChatModel(client *natsapi.Client, app, user, sessionID string, history [
 	sp := spinner.New(spinner.WithSpinner(spinner.Dot))
 
 	md, _ := glamour.NewTermRenderer(glamour.WithAutoStyle(), glamour.WithWordWrap(max(width-4, 20)))
+
+	autoMode, _ := state[natsapi.AutoModeStateKey].(bool)
 
 	m := chatModel{
 		client:      client,
@@ -162,6 +174,7 @@ func newChatModel(client *natsapi.Client, app, user, sessionID string, history [
 		md:          md,
 		toolCalls:   make(map[string]*toolCallView),
 		wrapperOrig: make(map[string]string),
+		autoMode:    autoMode,
 	}
 	if initialCwd != "" {
 		m.pendingStateDelta = map[string]any{"botson:cwd": initialCwd}
@@ -190,7 +203,14 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		m.refreshViewport()
 		return m, nil
 
+	case autoModeErrMsg:
+		m.appendLine(errorStyle.Render("auto mode: " + msg.err.Error()))
+		return m, nil
+
 	case tea.KeyMsg:
+		if msg.String() == "ctrl+a" {
+			return m.toggleAutoMode()
+		}
 		if len(m.confirmQueue) > 0 {
 			switch msg.String() {
 			case "y", "Y":
@@ -248,6 +268,19 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+// toggleAutoMode flips autoMode locally and persists it on the core via
+// SubjectSessionsSetAutoMode, so the core's own background automode worker
+// (and any other connected client) picks up the same setting.
+func (m chatModel) toggleAutoMode() (chatModel, tea.Cmd) {
+	m.autoMode = !m.autoMode
+	label := "OFF"
+	if m.autoMode {
+		label = "ON"
+	}
+	m.appendLine(dimStyle.Render(fmt.Sprintf("[auto mode: %s]", label)))
+	return m, setAutoModeCmd(m.client, m.app, m.user, m.sessionID, m.autoMode)
 }
 
 // answerConfirm records an answer for the confirmation at the front of
@@ -353,7 +386,8 @@ func (m *chatModel) processEvents(events []natsapi.Event) {
 					m.toolCalls[originalID] = tv
 				}
 
-				if args.Deferred() {
+				switch {
+				case args.Deferred():
 					// An ordering-only deferral (the core sequenced a
 					// non-gated call behind this turn's pending
 					// approvals) carries no human decision: answer it
@@ -367,7 +401,27 @@ func (m *chatModel) processEvents(events []natsapi.Event) {
 						},
 					})
 					tv.phase = "deferred"
-				} else {
+
+				case m.autoMode:
+					// Auto mode is on for this session: answer a genuine
+					// HITL confirmation ourselves instead of prompting,
+					// marked AutoModeResponseKey so history (and the
+					// core's own background automode worker, which would
+					// otherwise answer it too once we go quiet) can tell
+					// this was an unattended approval, not a human's y/n.
+					m.confirmResults = append(m.confirmResults, natsapi.Part{
+						FunctionResponse: &natsapi.FunctionResponse{
+							ID:   wrapperID,
+							Name: natsapi.ConfirmationFunctionName,
+							Response: map[string]any{
+								"confirmed":                 true,
+								natsapi.AutoModeResponseKey: true,
+							},
+						},
+					})
+					tv.phase = "auto-approved"
+
+				default:
 					// Queued, not answered immediately -- a model can call
 					// the same (or several) gated tools in parallel, and
 					// ADK batches every one of that turn's
@@ -406,10 +460,14 @@ func (m *chatModel) processEvents(events []natsapi.Event) {
 				if originalID, ok := m.wrapperOrig[part.FunctionResponse.ID]; ok {
 					if tv, ok := m.toolCalls[originalID]; ok {
 						confirmed, _ := part.FunctionResponse.Response["confirmed"].(bool)
-						if confirmed {
-							tv.phase = "approved"
-						} else {
+						auto, _ := part.FunctionResponse.Response[natsapi.AutoModeResponseKey].(bool)
+						switch {
+						case !confirmed:
 							tv.phase = "denied"
+						case auto:
+							tv.phase = "auto-approved"
+						default:
+							tv.phase = "approved"
 						}
 						m.lines[tv.lineIndex] = tv.render()
 					}
@@ -508,6 +566,9 @@ func isConfirmationBookkeeping(resp map[string]any) bool {
 func (m chatModel) View() string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render(fmt.Sprintf("%s -- session %s", m.app, shortID(m.sessionID))))
+	if m.autoMode {
+		b.WriteString("  " + confirmStyle.Render("[auto mode: ON]"))
+	}
 	b.WriteString("\n")
 	b.WriteString(m.viewport.View())
 	b.WriteString("\n")
@@ -526,9 +587,9 @@ func (m chatModel) View() string {
 	}
 	b.WriteString("\n")
 	if len(m.confirmQueue) > 0 {
-		b.WriteString(m.help.ShortHelpView([]key.Binding{keys.Approve, keys.Deny, keys.Scroll, keys.Quit}))
+		b.WriteString(m.help.ShortHelpView([]key.Binding{keys.Approve, keys.Deny, keys.AutoMode, keys.Scroll, keys.Quit}))
 	} else {
-		b.WriteString(m.help.ShortHelpView([]key.Binding{keys.Send, keys.Scroll, keys.Quit}))
+		b.WriteString(m.help.ShortHelpView([]key.Binding{keys.Send, keys.AutoMode, keys.Scroll, keys.Quit}))
 	}
 	return b.String()
 }

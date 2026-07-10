@@ -116,7 +116,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionReadyMsg:
 		m.loading = false
 		m.mode = modeChat
-		m.chat = newChatModel(m.client, m.selectedAgent, m.cfg.UserID, msg.sess.ID, msg.sess.Events, m.pendingCwd, m.width, m.height)
+		m.chat = newChatModel(m.client, m.selectedAgent, m.cfg.UserID, msg.sess.ID, msg.sess.Events, msg.sess.State, m.pendingCwd, m.width, m.height)
 		m.pendingCwd = ""
 		return m, m.chat.Init()
 

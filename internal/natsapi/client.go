@@ -164,6 +164,31 @@ func (c *Client) SessionsList(ctx context.Context, agent, user string) ([]Sessio
 	return stats, nil
 }
 
+// SetSessionAutoMode toggles unattended auto-approval for one session by
+// calling botson.sessions.setAutoMode.
+func (c *Client) SetSessionAutoMode(ctx context.Context, app, user, sessionID string, enabled bool) error {
+	req, err := json.Marshal(SessionsSetAutoModeRequest{
+		Agent:     app,
+		User:      user,
+		SessionID: sessionID,
+		Enabled:   enabled,
+	})
+	if err != nil {
+		return err
+	}
+
+	msg, err := c.nc.RequestWithContext(ctx, SubjectSessionsSetAutoMode, req)
+	if err != nil {
+		return fmt.Errorf("%s: %w", SubjectSessionsSetAutoMode, err)
+	}
+
+	var env errEnvelope
+	if err := json.Unmarshal(msg.Data, &env); err == nil && env.Error != "" {
+		return fmt.Errorf("%s: %s", SubjectSessionsSetAutoMode, env.Error)
+	}
+	return nil
+}
+
 // restError reports a non-2xx REST response as an error.
 func restError(resp *adkclient.Response) error {
 	if resp.Status >= 200 && resp.Status < 300 {

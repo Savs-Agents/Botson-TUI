@@ -101,7 +101,32 @@ const (
 	// stalls. See AGENTS.md "HITL confirmation wire protocol" in
 	// Botson-ADKv2.
 	DeferredConfirmationPayloadKey = "botsonToolOrderDeferred"
+
+	// AutoModeStateKey is the flat session-state key (management.AutoModeStateKey
+	// in Botson-ADKv2) that turns unattended auto-approval on for one
+	// session -- read back from Session.State to know whether to
+	// auto-answer confirmations instead of prompting, and set via
+	// SubjectSessionsSetAutoMode.
+	AutoModeStateKey = "botson:autoMode"
+
+	// SubjectSessionsSetAutoMode toggles AutoModeStateKey for one session.
+	SubjectSessionsSetAutoMode = "botson.sessions.setAutoMode"
+
+	// AutoModeResponseKey marks a confirmation FunctionResponse answered by
+	// the core's own background automode worker (Botson-ADKv2's
+	// internal/automode) rather than a human or the ordering-only deferral
+	// path -- present alongside "confirmed": true in the response map.
+	AutoModeResponseKey = "botsonAutoMode"
 )
+
+// SessionsSetAutoModeRequest is the request payload for
+// SubjectSessionsSetAutoMode.
+type SessionsSetAutoModeRequest struct {
+	Agent     string `json:"agent"`
+	User      string `json:"user"`
+	SessionID string `json:"sessionId"`
+	Enabled   bool   `json:"enabled"`
+}
 
 // ConfirmationArgs is the shape of a adk_request_confirmation functionCall's
 // Args map, decoded on demand (Args is untyped JSON on the wire).
