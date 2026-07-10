@@ -91,6 +91,16 @@ const (
 	// ConfirmationFunctionName is the synthetic functionCall name ADK
 	// wraps a gated tool call in when it requires human approval.
 	ConfirmationFunctionName = "adk_request_confirmation"
+
+	// DeferredConfirmationPayloadKey marks an ordering-only confirmation
+	// injected by Botson-ADKv2's toolorder plugin (its DeferredPayloadKey):
+	// a non-gated call the core paused solely so it runs after the turn's
+	// earlier, human-gated calls. It carries no human decision -- the
+	// client must answer it {"confirmed": true} immediately, batched with
+	// the user's answers to the turn's real confirmations, or the run
+	// stalls. See AGENTS.md "HITL confirmation wire protocol" in
+	// Botson-ADKv2.
+	DeferredConfirmationPayloadKey = "botsonToolOrderDeferred"
 )
 
 // ConfirmationArgs is the shape of a adk_request_confirmation functionCall's
@@ -98,6 +108,14 @@ const (
 type ConfirmationArgs struct {
 	OriginalFunctionCall *FunctionCall `json:"originalFunctionCall"`
 	ToolConfirmation     struct {
-		Hint string `json:"hint"`
+		Hint    string         `json:"hint"`
+		Payload map[string]any `json:"payload"`
 	} `json:"toolConfirmation"`
+}
+
+// Deferred reports whether this confirmation is an ordering-only deferral
+// (see DeferredConfirmationPayloadKey) rather than a real approval request.
+func (a ConfirmationArgs) Deferred() bool {
+	v, ok := a.ToolConfirmation.Payload[DeferredConfirmationPayloadKey].(bool)
+	return ok && v
 }

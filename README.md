@@ -50,8 +50,14 @@ From there: pick an agent, then pick or create a session. Creating a new
 session asks for an optional working directory — an absolute path the
 agent's file/command tools should use for that session instead of the
 core's own default workspace; leave it blank to use the default. Then
-chat. If a tool call needs your approval, the prompt will say so — press
-`y` to approve or `n` to deny.
+chat. Each tool call gets one status line (`▸ toolName  called · {args}`)
+that updates in place as it moves through its lifecycle rather than
+spawning a new line per stage — `? toolName  awaiting approval · {args}`
+means it's waiting on you (the footer names which one `y`/`n` currently
+answers); `✓ toolName  deferred` means the core queued a read-only call to
+run after this turn's approvals and answered it for you automatically,
+no action needed; `✓ toolName  done` or `✗ toolName  error · …` is the
+final outcome.
 
 ## Scope
 

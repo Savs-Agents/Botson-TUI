@@ -16,13 +16,69 @@ import (
 	"github.com/Savs-Agents/Botson-TUI/internal/natsapi"
 )
 
+// argsPreviewMaxLen bounds how much of a tool call's args/error text shows
+// inline in its status line -- enough to be useful, short enough that one
+// call never dominates the log.
+const argsPreviewMaxLen = 80
+
+// toolCallView is the single, in-place-updating status line for one tool
+// call across its full lifecycle: called -> awaiting approval/deferred ->
+// approved/denied -> done/error. Replacing what used to be up to four
+// separate appended lines per call (call, approve prompt, approved/denied,
+// result) with one line that mutates in place has a second benefit beyond
+// decluttering: the line's position in m.lines is fixed the moment the call
+// is first seen (from the model-response event, a real ordered slice), so a
+// later confirmation or result event arriving in ADK's own map-scrambled
+// order (see AGENTS.md "HITL confirmation wire protocol" in Botson-ADKv2)
+// only updates that fixed slot -- there's no append-in-arrival-order step
+// left for the scrambling to visibly corrupt.
+type toolCallView struct {
+	name        string
+	argsPreview string
+	phase       string // "called", "awaiting approval", "deferred", "approved", "denied", "done", "error"
+	detail      string // set only for phase == "error": the truncated failure message
+	lineIndex   int
+}
+
+func newToolCallView(name, argsPreview string) *toolCallView {
+	return &toolCallView{name: name, argsPreview: argsPreview, phase: "called"}
+}
+
+func (v *toolCallView) render() string {
+	glyph, style := "▸", dimStyle
+	switch v.phase {
+	case "awaiting approval":
+		glyph, style = "?", confirmStyle
+	case "denied", "error":
+		glyph, style = "✗", errorStyle
+	case "done", "approved", "deferred":
+		glyph, style = "✓", dimStyle
+	}
+	text := fmt.Sprintf("%s %-15s %s", glyph, v.name, v.phase)
+	switch {
+	case v.phase == "error" && v.detail != "":
+		text += " · " + v.detail
+	case v.argsPreview != "":
+		text += " · " + v.argsPreview
+	}
+	return style.Render(text)
+}
+
+func truncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "..."
+}
+
 // pendingConfirmation tracks an in-flight human-in-the-loop approval --
 // see AGENTS.md "HITL confirmation wire protocol" in Botson-ADKv2 for the
 // full event sequence this is built against.
 type pendingConfirmation struct {
-	confirmCallID string
-	toolName      string
-	hint          string
+	confirmCallID  string // the adk_request_confirmation wrapper's own call id -- what the FunctionResponse answer must reuse
+	originalCallID string // the real tool call's id -- keys into chatModel.toolCalls so the answer can update its status line
+	toolName       string
 }
 
 // chatModel is the main conversation view: history, input, and whatever
@@ -41,6 +97,18 @@ type chatModel struct {
 	md       *glamour.TermRenderer
 	waiting  bool
 
+	// toolCalls holds every tool call's status line seen so far this
+	// session, keyed by the call's own (stable, original) FunctionCall.ID
+	// -- see toolCallView's doc for why this replaces the old append-only
+	// per-stage log lines.
+	toolCalls map[string]*toolCallView
+
+	// wrapperOrig maps an adk_request_confirmation wrapper's own call id to
+	// the original tool call id it's confirming -- needed because a
+	// confirmation's answer (whether live or replayed from history) only
+	// carries the wrapper's id, not the original call's.
+	wrapperOrig map[string]string
+
 	// confirmQueue holds every HITL confirmation still awaiting an answer
 	// from the current turn -- a model can call the same gated tool (or
 	// several) in parallel, and ADK batches all of their
@@ -54,6 +122,12 @@ type chatModel struct {
 	// turn needs a response before the run can proceed, so answering only
 	// the first and sending immediately would leave the rest hanging
 	// until the backend's context deadline exceeded.
+	//
+	// Ordering-only deferred confirmations (Deferred() true -- injected by
+	// the core's toolorder plugin for a non-gated call sequenced behind
+	// this turn's pending approvals) never enter confirmQueue: their
+	// approved FunctionResponse goes straight into confirmResults, riding
+	// out with the human's answers.
 	confirmQueue   []pendingConfirmation
 	confirmResults []natsapi.Part
 
@@ -77,15 +151,17 @@ func newChatModel(client *natsapi.Client, app, user, sessionID string, history [
 	md, _ := glamour.NewTermRenderer(glamour.WithAutoStyle(), glamour.WithWordWrap(max(width-4, 20)))
 
 	m := chatModel{
-		client:    client,
-		app:       app,
-		user:      user,
-		sessionID: sessionID,
-		viewport:  vp,
-		input:     ta,
-		spinner:   sp,
-		help:      help.New(),
-		md:        md,
+		client:      client,
+		app:         app,
+		user:        user,
+		sessionID:   sessionID,
+		viewport:    vp,
+		input:       ta,
+		spinner:     sp,
+		help:        help.New(),
+		md:          md,
+		toolCalls:   make(map[string]*toolCallView),
+		wrapperOrig: make(map[string]string),
 	}
 	if initialCwd != "" {
 		m.pendingStateDelta = map[string]any{"botson:cwd": initialCwd}
@@ -175,19 +251,24 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 }
 
 // answerConfirm records an answer for the confirmation at the front of
-// confirmQueue and pops it. If more are still queued (a parallel turn with
-// several gated calls), it waits for the next y/n instead of sending
-// anything yet -- every one of them needs an answer before the run can
-// proceed, so the batched FunctionResponses only go out once the queue is
-// empty.
+// confirmQueue, updates that call's status line in place, and pops it. If
+// more are still queued (a parallel turn with several gated calls), it
+// waits for the next y/n instead of sending anything yet -- every one of
+// them needs an answer before the run can proceed, so the batched
+// FunctionResponses only go out once the queue is empty.
 func (m chatModel) answerConfirm(confirmed bool) (chatModel, tea.Cmd) {
 	pc := m.confirmQueue[0]
 	m.confirmQueue = m.confirmQueue[1:]
-	label := "denied"
-	if confirmed {
-		label = "approved"
+
+	if tv, ok := m.toolCalls[pc.originalCallID]; ok {
+		if confirmed {
+			tv.phase = "approved"
+		} else {
+			tv.phase = "denied"
+		}
+		m.lines[tv.lineIndex] = tv.render()
 	}
-	m.appendLine(dimStyle.Render(fmt.Sprintf("[%s: %s]", label, pc.toolName)))
+	m.refreshViewport()
 
 	m.confirmResults = append(m.confirmResults, natsapi.Part{
 		FunctionResponse: &natsapi.FunctionResponse{
@@ -201,6 +282,12 @@ func (m chatModel) answerConfirm(confirmed bool) (chatModel, tea.Cmd) {
 		return m, nil
 	}
 
+	return m.sendConfirmResults()
+}
+
+// sendConfirmResults flushes the accumulated confirmation answers (human
+// and auto-approved deferred ones alike) back to the core as one user turn.
+func (m chatModel) sendConfirmResults() (chatModel, tea.Cmd) {
 	parts := m.confirmResults
 	m.confirmResults = nil
 	m.waiting = true
@@ -211,13 +298,20 @@ func (m chatModel) answerConfirm(confirmed bool) (chatModel, tea.Cmd) {
 	return m, tea.Batch(m.spinner.Tick, runTurnCmd(m.client, m.app, m.user, m.sessionID, resp, nil))
 }
 
-// applyEvents renders a turn's (or a resumed session's) events into the
-// chat and clears the waiting spinner.
-func (m chatModel) applyEvents(events []natsapi.Event) chatModel {
+// applyEvents renders a turn's events into the chat and clears the waiting
+// spinner. If the turn left auto-approved deferred confirmations pending
+// with no human prompt alongside them to trigger answerConfirm's send, they
+// are flushed immediately (a deferred confirmation normally co-occurs with
+// at least one real prompt in the same event, but the run would stall
+// forever if one ever arrived alone).
+func (m chatModel) applyEvents(events []natsapi.Event) (chatModel, tea.Cmd) {
 	m.waiting = false
 	m.processEvents(events)
 	m.refreshViewport()
-	return m
+	if len(m.confirmQueue) == 0 && len(m.confirmResults) > 0 {
+		return m.sendConfirmResults()
+	}
+	return m, nil
 }
 
 func (m chatModel) applyError(err error) chatModel {
@@ -239,37 +333,109 @@ func (m *chatModel) processEvents(events []natsapi.Event) {
 
 			case part.FunctionCall != nil && part.FunctionCall.Name == natsapi.ConfirmationFunctionName:
 				args := decodeConfirmationArgs(part.FunctionCall.Args)
-				toolName := ""
-				argsPreview := ""
+				wrapperID := part.FunctionCall.ID
+				var originalID, originalName string
 				if args.OriginalFunctionCall != nil {
-					toolName = args.OriginalFunctionCall.Name
-					if len(args.OriginalFunctionCall.Args) > 0 {
-						if b, err := json.Marshal(args.OriginalFunctionCall.Args); err == nil {
-							argsPreview = "\n  " + string(b)
-						}
-					}
+					originalID = args.OriginalFunctionCall.ID
+					originalName = args.OriginalFunctionCall.Name
 				}
-				// Queued, not answered immediately -- a model can call the
-				// same (or several) gated tools in parallel, and ADK
-				// batches every one of that turn's adk_request_confirmation
-				// wrappers into this single event rather than one event
-				// each, so there can be more than one of these per call to
-				// processEvents.
-				m.confirmQueue = append(m.confirmQueue, pendingConfirmation{
-					confirmCallID: part.FunctionCall.ID,
-					toolName:      toolName,
-					hint:          args.ToolConfirmation.Hint,
-				})
-				m.lines = append(m.lines, confirmStyle.Render(fmt.Sprintf("! %s%s\n  Approve? (y/n)", args.ToolConfirmation.Hint, argsPreview)))
+				m.wrapperOrig[wrapperID] = originalID
+
+				tv, ok := m.toolCalls[originalID]
+				if !ok {
+					// The plain FunctionCall this confirms should always
+					// have been seen already (it precedes its wrapper in
+					// every real turn) -- this fallback only guards
+					// against an unexpected/partial event feed.
+					tv = newToolCallView(originalName, "")
+					m.lines = append(m.lines, tv.render())
+					tv.lineIndex = len(m.lines) - 1
+					m.toolCalls[originalID] = tv
+				}
+
+				if args.Deferred() {
+					// An ordering-only deferral (the core sequenced a
+					// non-gated call behind this turn's pending
+					// approvals) carries no human decision: answer it
+					// approved immediately, batched with the real
+					// answers, and never show a y/n prompt for it.
+					m.confirmResults = append(m.confirmResults, natsapi.Part{
+						FunctionResponse: &natsapi.FunctionResponse{
+							ID:       wrapperID,
+							Name:     natsapi.ConfirmationFunctionName,
+							Response: map[string]any{"confirmed": true},
+						},
+					})
+					tv.phase = "deferred"
+				} else {
+					// Queued, not answered immediately -- a model can call
+					// the same (or several) gated tools in parallel, and
+					// ADK batches every one of that turn's
+					// adk_request_confirmation wrappers into this single
+					// event rather than one event each.
+					m.confirmQueue = append(m.confirmQueue, pendingConfirmation{
+						confirmCallID:  wrapperID,
+						originalCallID: originalID,
+						toolName:       tv.name,
+					})
+					tv.phase = "awaiting approval"
+				}
+				m.lines[tv.lineIndex] = tv.render()
 
 			case part.FunctionCall != nil:
-				m.lines = append(m.lines, dimStyle.Render(fmt.Sprintf("[tool call: %s]", part.FunctionCall.Name)))
+				if _, seen := m.toolCalls[part.FunctionCall.ID]; !seen {
+					argsPreview := ""
+					if len(part.FunctionCall.Args) > 0 {
+						if b, err := json.Marshal(part.FunctionCall.Args); err == nil {
+							argsPreview = truncate(string(b), argsPreviewMaxLen)
+						}
+					}
+					tv := newToolCallView(part.FunctionCall.Name, argsPreview)
+					m.lines = append(m.lines, tv.render())
+					tv.lineIndex = len(m.lines) - 1
+					m.toolCalls[part.FunctionCall.ID] = tv
+				}
+
+			case part.FunctionResponse != nil && part.FunctionResponse.Name == natsapi.ConfirmationFunctionName:
+				// An already-recorded answer to a confirmation (seen when
+				// replaying a resumed session's history): reflect that
+				// answer on the call's status line, and drop any
+				// queue/auto entry that thinks it's still unanswered
+				// instead of prompting for (or re-sending) it again.
+				m.resolveConfirmation(part.FunctionResponse.ID)
+				if originalID, ok := m.wrapperOrig[part.FunctionResponse.ID]; ok {
+					if tv, ok := m.toolCalls[originalID]; ok {
+						confirmed, _ := part.FunctionResponse.Response["confirmed"].(bool)
+						if confirmed {
+							tv.phase = "approved"
+						} else {
+							tv.phase = "denied"
+						}
+						m.lines[tv.lineIndex] = tv.render()
+					}
+				}
 
 			case part.FunctionResponse != nil:
 				if isConfirmationBookkeeping(part.FunctionResponse.Response) {
 					continue
 				}
-				m.lines = append(m.lines, dimStyle.Render(fmt.Sprintf("[tool result: %s]", part.FunctionResponse.Name)))
+				tv, ok := m.toolCalls[part.FunctionResponse.ID]
+				if !ok {
+					// The plain FunctionCall this answers should always
+					// have been seen already -- this fallback only guards
+					// against an unexpected/partial event feed.
+					tv = newToolCallView(part.FunctionResponse.Name, "")
+					m.lines = append(m.lines, tv.render())
+					tv.lineIndex = len(m.lines) - 1
+					m.toolCalls[part.FunctionResponse.ID] = tv
+				}
+				if errMsg, ok := part.FunctionResponse.Response["error"].(string); ok {
+					tv.phase = "error"
+					tv.detail = truncate(errMsg, argsPreviewMaxLen)
+				} else {
+					tv.phase = "done"
+				}
+				m.lines[tv.lineIndex] = tv.render()
 			}
 		}
 	}
@@ -297,6 +463,27 @@ func (m *chatModel) appendLine(line string) {
 func (m *chatModel) refreshViewport() {
 	m.viewport.SetContent(strings.Join(m.lines, "\n\n"))
 	m.viewport.GotoBottom()
+}
+
+// resolveConfirmation removes any pending prompt or accumulated answer for
+// the given adk_request_confirmation call id -- called when history replay
+// shows that id was already answered in a previous run of the TUI.
+func (m *chatModel) resolveConfirmation(confirmCallID string) {
+	queue := m.confirmQueue[:0]
+	for _, pc := range m.confirmQueue {
+		if pc.confirmCallID != confirmCallID {
+			queue = append(queue, pc)
+		}
+	}
+	m.confirmQueue = queue
+
+	results := m.confirmResults[:0]
+	for _, part := range m.confirmResults {
+		if part.FunctionResponse == nil || part.FunctionResponse.ID != confirmCallID {
+			results = append(results, part)
+		}
+	}
+	m.confirmResults = results
 }
 
 func decodeConfirmationArgs(args map[string]any) natsapi.ConfirmationArgs {
@@ -329,7 +516,7 @@ func (m chatModel) View() string {
 		b.WriteString(m.spinner.View())
 		b.WriteString(" thinking...")
 	case len(m.confirmQueue) > 0:
-		msg := "Waiting for your approval"
+		msg := fmt.Sprintf("Waiting for your approval: %s", m.confirmQueue[0].toolName)
 		if n := len(m.confirmQueue); n > 1 {
 			msg = fmt.Sprintf("%s (%d more pending)", msg, n-1)
 		}

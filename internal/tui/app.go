@@ -126,8 +126,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case turnDoneMsg:
-		m.chat = m.chat.applyEvents(msg.events)
-		return m, nil
+		var cmd tea.Cmd
+		m.chat, cmd = m.chat.applyEvents(msg.events)
+		return m, cmd
 
 	case turnErrMsg:
 		m.chat = m.chat.applyError(msg.err)
