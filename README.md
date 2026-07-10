@@ -40,9 +40,9 @@ On first run you'll be asked for the core's host/port, a user ID (*your*
 choice; the core makes no assumptions about what one looks like), and a
 NATS auth token — the core rejects unauthenticated connections. If the
 core is running on this same machine, its token is auto-detected from
-`~/.botson/config.json` (the same file `botson setup install` writes) and
-the field is pre-filled; for a remote core, paste in the token it printed
-at setup time. All of this is remembered for next time in
+`~/.botson/config.json` and the field is pre-filled; for a remote core,
+paste in that core's own `nats_auth_token` from its `config.json`. All of
+this is remembered for next time in
 `<user config dir>/botson-tui/config.json` (on Windows,
 `%AppData%\botson-tui\config.json`).
 

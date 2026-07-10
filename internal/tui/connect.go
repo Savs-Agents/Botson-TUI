@@ -24,9 +24,9 @@ func newConnectModel(host string, port int, userID, token string) connectModel {
 	if token == "" {
 		if local, ok := natsapi.LocalToken(); ok {
 			token = local
-			tokenHelp = "Auto-detected from this machine's ~/.botson/config.json (a local core). For a remote core, replace it with the token given at setup time."
+			tokenHelp = "Auto-detected from this machine's ~/.botson/config.json (a local core). For a remote core, replace it with that core's own nats_auth_token."
 		} else {
-			tokenHelp = "Required -- the core rejects unauthenticated connections. No local core detected on this machine; paste in the token printed by `setup install` (or read from the core's own ~/.botson/config.json)."
+			tokenHelp = "Required -- the core rejects unauthenticated connections. No local core detected on this machine; read the token from the core's own ~/.botson/config.json (nats_auth_token)."
 		}
 	}
 
