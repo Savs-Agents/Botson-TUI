@@ -3,7 +3,7 @@ module github.com/Savs-Agents/Botson-TUI
 go 1.26.3
 
 require (
-	github.com/Savs-Agents/NATS-ADK-Proxy v0.0.0-20260710063519-6c77d5460700
+	github.com/Savs-Agents/NATS-ADK-Proxy v0.0.0-20260710065543-67b8773166e3
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/glamour v1.0.0
