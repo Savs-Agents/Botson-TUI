@@ -1,6 +1,6 @@
 // Command botson-tui is a standalone terminal chat client for a running
 // `botson core`, talking to it purely over NATS -- see
-// https://github.com/xSaVageAU/Botson-ADKv2/blob/core-rebuild/docs/nats-api.md
+// https://github.com/Savs-Agents/Botson-ADKv2/blob/core-rebuild/docs/nats-api.md
 // for the wire contract this app is built against.
 package main
 

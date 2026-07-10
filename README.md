@@ -1,7 +1,7 @@
 # Botson-TUI
 
 A standalone terminal chat client for a running [`botson
-core`](https://github.com/xSaVageAU/Botson-ADKv2) — connect, pick an agent,
+core`](https://github.com/Savs-Agents/Botson-ADKv2) — connect, pick an agent,
 create or resume a session, and chat. It talks to the core purely over
 NATS, the same way any other consumer (a Discord bot, a web UI, anything
 else) would; there's no special access and no Go package shared with the
@@ -11,7 +11,7 @@ This exists as a reference consumer: Botson-ADKv2's whole design is that
 its *only* interface is NATS, and that any client, in any language, can
 drive it. Botson-TUI is the first real proof of that — everything here
 goes through the wire contract documented in
-[`docs/nats-api.md`](https://github.com/xSaVageAU/Botson-ADKv2/blob/core-rebuild/docs/nats-api.md)
+[`docs/nats-api.md`](https://github.com/Savs-Agents/Botson-ADKv2/blob/core-rebuild/docs/nats-api.md)
 in the core's own repo.
 
 Built with the [Charmbracelet](https://charm.sh) stack: bubbletea for the
