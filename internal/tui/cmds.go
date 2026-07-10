@@ -97,7 +97,12 @@ func setAutoModeCmd(c *natsapi.Client, app, user, sessionID string, enabled bool
 
 func runTurnCmd(c *natsapi.Client, app, user, sessionID string, newMessage natsapi.Content, stateDelta map[string]any) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		// Must stay above the core's own gateway RequestTimeout (see
+		// Botson-ADKv2's cmd/botson-core/cmd_core.go, currently 8m) or
+		// this deadline fires first, cutting off a real multi-tool-call
+		// turn before the core's own timeout would have -- masking the
+		// real error with a generic context-deadline one instead.
+		ctx, cancel := context.WithTimeout(context.Background(), 9*time.Minute)
 		defer cancel()
 		events, err := c.RunTurn(ctx, app, user, sessionID, newMessage, stateDelta)
 		if err != nil {

@@ -35,11 +35,14 @@ func Connect(host string, port int, token string) (*Client, error) {
 	return &Client{
 		nc: nc,
 		// Must stay above the core's own gateway RequestTimeout (see
-		// Botson-ADKv2's cmd/botson-core/cmd_core.go, currently
-		// procutil.DefaultTimeout + 90s = 3m30s) or this client gives up
-		// before the core's own request-to-backend deadline would have,
-		// masking the real error with a generic NATS timeout instead.
-		adk: adkclient.New(nc, adkclient.WithTimeout(4*time.Minute)),
+		// Botson-ADKv2's cmd/botson-core/cmd_core.go, currently 8m) or
+		// this client gives up before the core's own request-to-backend
+		// deadline would have, masking the real error with a generic NATS
+		// timeout instead. This is only the fallback for calls that don't
+		// set their own ctx deadline -- runTurnCmd (internal/tui/cmds.go)
+		// sets its own, longer one for the one call (RunTurn) that can
+		// legitimately take minutes.
+		adk: adkclient.New(nc, adkclient.WithTimeout(9*time.Minute)),
 	}, nil
 }
 
